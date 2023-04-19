@@ -18,11 +18,14 @@ ros::Publisher pub_cloud;
 ros::Publisher pub_ground;
 ros::Publisher pub_non_ground;
 
+ros::Time g_time;
+
 template<typename T>
 sensor_msgs::PointCloud2 cloud2msg(pcl::PointCloud<T> cloud, std::string frame_id = "map") {
     sensor_msgs::PointCloud2 cloud_ROS;
     pcl::toROSMsg(cloud, cloud_ROS);
     cloud_ROS.header.frame_id = frame_id;
+    cloud_ROS.header.stamp = g_time;
     return cloud_ROS;
 }
 
@@ -35,7 +38,7 @@ void callbackCloud(const sensor_msgs::PointCloud2::Ptr &cloud_msg)
     pcl::PointCloud<PointType> pc_non_ground;
     
     pcl::fromROSMsg(*cloud_msg, pc_curr);
-
+    g_time = cloud_msg->header.stamp;
     PatchworkppGroundSeg->estimate_ground(pc_curr, pc_ground, pc_non_ground, time_taken);
 
     cout << "\033[1;32m" << "Result: Input PointCloud: " << pc_curr.size() << " -> Ground: " << pc_ground.size() <<  "/ NonGround: " << pc_non_ground.size()

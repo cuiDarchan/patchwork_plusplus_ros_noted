@@ -1,13 +1,13 @@
 save_flag: true
 
 patchworkpp:
-    
+
     sensor_height: 1.723
 
-    mode: "czm" 
+    mode: "czm"
     verbose: false   # To check effect of uprightness/elevation/flatness
     visualize: true  # Ground Likelihood Estimation is visualized
-    
+
     # Ground Plane Fitting parameters
     num_iter: 3             # Number of iterations for ground plane estimation using PCA.
     num_lpr: 20             # Maximum number of points to be selected as lowest points representative.
@@ -31,6 +31,6 @@ patchworkpp:
     enable_RNR : true
     enable_RVPF : true
     enable_TGR : true
-    
+
     RNR_ver_angle_thr : -15.0 # Noise points vertical angle threshold. Downward rays of LiDAR are more likely to generate severe noise points.
     RNR_intensity_thr : 0.2   # Noise points intensity threshold. The reflected points have relatively small intensity than others.

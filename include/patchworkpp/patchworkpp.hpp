@@ -60,7 +60,7 @@ template <typename PointT>
 class PatchWorkpp {
 
 public:
-    typedef std::vector<pcl::PointCloud<PointT>> Ring;
+    typedef std::vector<pcl::PointCloud<PointT>> Ring; // 处于同一R范围内的patch集合
     typedef std::vector<Ring> Zone;
 
     PatchWorkpp() {};
@@ -160,12 +160,16 @@ public:
                       (min_range_z3_ - min_range_z2_) / num_rings_each_zone_.at(1),
                       (min_range_z4_ - min_range_z3_) / num_rings_each_zone_.at(2),
                       (max_range_ - min_range_z4_) / num_rings_each_zone_.at(3)};
+        for(const auto& x: ring_sizes_){
+            std::cout << " ring_sizes_: " << x << std::endl;
+        }
         sector_sizes_ = {2 * M_PI / num_sectors_each_zone_.at(0), 2 * M_PI / num_sectors_each_zone_.at(1),
                         2 * M_PI / num_sectors_each_zone_.at(2),
                         2 * M_PI / num_sectors_each_zone_.at(3)};
 
         cout << "INITIALIZATION COMPLETE" << endl;
 
+        // 构建CZM模型
         for (int i = 0; i < num_zones_; i++) {
             Zone z;
             initialize_zone(z, num_sectors_each_zone_[i], num_rings_each_zone_[i]);
@@ -182,7 +186,7 @@ private:
 
     ros::NodeHandle node_handle_;
 
-    std::recursive_mutex mutex_;
+    std::recursive_mutex mutex_; // 递归锁
 
     int num_iter_;
     int num_lpr_;
@@ -299,11 +303,15 @@ private:
 
 };
 
+
+/*
+ * 初始化zone：每一个patch预留了1000个点的空间
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::initialize_zone(Zone &z, int num_sectors, int num_rings) {
     z.clear();
     pcl::PointCloud<PointT> cloud;
-    cloud.reserve(1000);
+    cloud.reserve(1000);// 预留了1000个点数的空间
     Ring ring;
     for (int i = 0; i < num_sectors; i++) {
         ring.emplace_back(cloud);
@@ -313,6 +321,10 @@ void PatchWorkpp<PointT>::initialize_zone(Zone &z, int num_sectors, int num_ring
     }
 }
 
+
+/*
+ * 重置操作：清空每一个zone中的点云
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::flush_patches_in_zone(Zone &patches, int num_sectors, int num_rings) {
     for (int i = 0; i < num_sectors; i++) {
@@ -322,6 +334,9 @@ void PatchWorkpp<PointT>::flush_patches_in_zone(Zone &patches, int num_sectors, 
     }
 }
 
+/*
+ * 重置操作：清空每一个patch中的点云
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::flush_patches(vector<Zone> &czm) {
     for (int k = 0; k < num_zones_; k++) {
@@ -335,6 +350,10 @@ void PatchWorkpp<PointT>::flush_patches(vector<Zone> &czm) {
     if( verbose_ ) cout << "Flushed patches" << endl;
 }
 
+
+/*
+ * 平面估计：svd奇异值分解，求平面法向量
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::estimate_plane(const pcl::PointCloud<PointT> &ground) {
     pcl::computeMeanAndCovarianceMatrix(ground, cov_, pc_mean_);
@@ -354,6 +373,10 @@ void PatchWorkpp<PointT>::estimate_plane(const pcl::PointCloud<PointT> &ground) 
     d_ = -(normal_.transpose() * seeds_mean)(0, 0);
 }
 
+
+/*
+ * 垂直平面估计：初始种子点选择
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::extract_initial_seeds(
         const int zone_idx, const pcl::PointCloud<PointT> &p_sorted,
@@ -365,6 +388,7 @@ void PatchWorkpp<PointT>::extract_initial_seeds(
     int cnt = 0;
 
     int init_idx = 0;
+    // 找寻排序后点云初始索引
     if (zone_idx == 0) {
         for (int i = 0; i < p_sorted.points.size(); i++) {
             if (p_sorted.points[i].z < adaptive_seed_selection_margin_ * sensor_height_) {
@@ -375,11 +399,12 @@ void PatchWorkpp<PointT>::extract_initial_seeds(
         }
     }
 
-    // Calculate the mean height value.
+    // Calculate the mean height value. 计算20个点的均值
     for (int i = init_idx; i < p_sorted.points.size() && cnt < num_lpr_; i++) {
         sum += p_sorted.points[i].z;
         cnt++;
     }
+    // lpr_height 代表地面近似高度值
     double lpr_height = cnt != 0 ? sum / cnt : 0;// in case divide by 0
 
     // iterate pointcloud, filter those height is less than lpr.height+th_seeds_
@@ -390,6 +415,10 @@ void PatchWorkpp<PointT>::extract_initial_seeds(
     }
 }
 
+
+/*
+ * 初始种子点选择
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::extract_initial_seeds(
         const int zone_idx, const pcl::PointCloud<PointT> &p_sorted,
@@ -418,7 +447,7 @@ void PatchWorkpp<PointT>::extract_initial_seeds(
     }
     double lpr_height = cnt != 0 ? sum / cnt : 0;// in case divide by 0
 
-    // iterate pointcloud, filter those height is less than lpr.height+th_seeds_
+    // iterate pointcloud, filter those height is less than lpr.height+th_seeds_(0.3)，认为这些种子点更多的是地面点
     for (int i = 0; i < p_sorted.points.size(); i++) {
         if (p_sorted.points[i].z < lpr_height + th_seeds_) {
             init_seeds.points.push_back(p_sorted.points[i]);
@@ -426,15 +455,23 @@ void PatchWorkpp<PointT>::extract_initial_seeds(
     }
 }
 
+
+/*
+ * RNR模块
+ * 功能：移除低于地表的噪声点云
+ * @param_in: 输入点云
+ * @param_out: 非地点
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::reflected_noise_removal(pcl::PointCloud<PointT> &cloud_in, pcl::PointCloud<PointT> &cloud_nonground)
 {
     for (int i=0; i<cloud_in.size(); i++) 
     {
-        double r = sqrt( cloud_in[i].x*cloud_in[i].x + cloud_in[i].y*cloud_in[i].y );
+        double r = sqrt( cloud_in[i].x * cloud_in[i].x + cloud_in[i].y * cloud_in[i].y );
         double z = cloud_in[i].z;
         double ver_angle_in_deg = atan2(z, r)*180/M_PI;
-        
+
+        // 噪声判别条件: 垂直角 < -15° ，且高程小于传感器高度 - 0.8，且激光强度值小于 0.2
         if ( ver_angle_in_deg < RNR_ver_angle_thr_ && z < -sensor_height_-0.8 && cloud_in[i].intensity < RNR_intensity_thr_)
         {
             cloud_nonground.push_back(cloud_in[i]);
@@ -446,12 +483,13 @@ void PatchWorkpp<PointT>::reflected_noise_removal(pcl::PointCloud<PointT> &cloud
     if (verbose_) cout << "[ RNR ] Num of noises : " << noise_pc_.points.size() << endl;
 }
 
+
 /*
+    主函数：地平面估计
     @brief Velodyne pointcloud callback function. The main GPF pipeline is here.
     PointCloud SensorMsg -> Pointcloud -> z-value sorted Pointcloud
     ->error points removal -> extract ground seeds -> ground plane fit mainloop
 */
-
 template<typename PointT> inline
 void PatchWorkpp<PointT>::estimate_ground(
         pcl::PointCloud<PointT> cloud_in,
@@ -461,7 +499,7 @@ void PatchWorkpp<PointT>::estimate_ground(
     
     unique_lock<recursive_mutex> lock(mutex_);
 
-    poly_list_.header.stamp = ros::Time::now();
+    poly_list_.header.stamp = ros::Time::now(); // poly_list_ 用于可视化？
     if (!poly_list_.polygons.empty()) poly_list_.polygons.clear();
     if (!poly_list_.likelihood.empty()) poly_list_.likelihood.clear();
 
@@ -483,6 +521,7 @@ void PatchWorkpp<PointT>::estimate_ground(
     t1 = ros::Time::now().toSec();
 
     // 2. Concentric Zone Model (CZM)
+    // 清空每一个patch中的点，将输入点云存入到对应的CZM模型中
     flush_patches(ConcentricZoneModel_);
     pc2czm(cloud_in, ConcentricZoneModel_, cloud_nonground);
 
@@ -495,6 +534,7 @@ void PatchWorkpp<PointT>::estimate_ground(
     std::vector<RevertCandidate<PointT>> candidates;
     std::vector<double> ringwise_flatness;
     
+    // 三层循环，遍历每一个patch进行地面点和非地面点提取
     for (int zone_idx = 0; zone_idx < num_zones_; ++zone_idx) {
         
         auto zone = ConcentricZoneModel_[zone_idx];
@@ -502,6 +542,7 @@ void PatchWorkpp<PointT>::estimate_ground(
         for (int ring_idx = 0; ring_idx < num_rings_each_zone_[zone_idx]; ++ring_idx) {
             for (int sector_idx = 0; sector_idx < num_sectors_each_zone_[zone_idx]; ++sector_idx) {
                 
+                // 若某一个patch中点数小于10，直接归类为非地点
                 if (zone[ring_idx][sector_idx].points.size() < num_min_pts_)
                 {
                     cloud_nonground += zone[ring_idx][sector_idx];
@@ -510,7 +551,7 @@ void PatchWorkpp<PointT>::estimate_ground(
 
                 // --------- region-wise sorting (faster than global sorting method) ---------------- //
                 double t_sort_0 = ros::Time::now().toSec();
-                
+                // 每一个patch中点， 由小到大排序
                 sort(zone[ring_idx][sector_idx].points.begin(), zone[ring_idx][sector_idx].points.end(), point_z_cmp<PointT>);
                 
                 double t_sort_1 = ros::Time::now().toSec();
@@ -524,16 +565,20 @@ void PatchWorkpp<PointT>::estimate_ground(
                 t_total_ground += t_tmp1 - t_tmp0;
                 pca_time_ += t_tmp1 - t_tmp0;
 
-                // Status of each patch
-                // used in checking uprightness, elevation, and flatness, respectively
-                const double ground_uprightness = normal_(2);
-                const double ground_elevation   = pc_mean_(2, 0);
-                const double ground_flatness    = singular_values_.minCoeff();
-                const double line_variable      = singular_values_(1) != 0 ? singular_values_(0)/singular_values_(1) : std::numeric_limits<double>::max();
-                
+                // Status of each patch，进行每个patch中状态的似然估计
+                // used in checking uprightness, elevation, and flatness, heading，respectively
+                const double ground_uprightness = normal_(2); // 垂直度
+                const double ground_elevation   = pc_mean_(2, 0); // z
+                const double ground_flatness    = singular_values_.minCoeff();// 平坦度，最小特征值
+                const double line_variable      = singular_values_(1) != 0 ? singular_values_(0)/singular_values_(1) : std::numeric_limits<double>::max();// 两个主要方向离散度情况
+                // std::cout << "normal_: " << normal_(0) << "," << normal_(1) << ","<< normal_(2) << std::endl;
+                // std::cout << "pc_mean_: " << pc_mean_ << std::endl;
+                // std::cout << "ground_flatness: " <<  ground_flatness << std::endl;
                 double heading = 0.0;
-                for(int i=0; i<3; i++) heading += pc_mean_(i,0)*normal_(i);
+                for(int i=0; i<3; i++) heading += pc_mean_(i,0)*normal_(i); // 向量点积，求夹角，地面点 <0
+                // std::cout << "heading: " << heading << std::endl;
 
+                // 可视化
                 if (visualize_) {
                     auto polygons = set_polygons(zone_idx, ring_idx, sector_idx, 3);
                     polygons.header = poly_list_.header;
@@ -562,29 +607,30 @@ void PatchWorkpp<PointT>::estimate_ground(
                     
                     Therefore, we only check this value when concentric_idx < num_rings_of_interest ( near condition )
                 */
-                bool is_upright         = ground_uprightness > uprightness_thr_;
-                bool is_not_elevated    = ground_elevation < elevation_thr_[concentric_idx];
-                bool is_flat            = ground_flatness < flatness_thr_[concentric_idx];
-                bool is_near_zone       = concentric_idx < num_rings_of_interest_;
-                bool is_heading_outside = heading < 0.0;
+                bool is_upright         = ground_uprightness > uprightness_thr_; // 法向量是否垂直，即是否为地平面
+                bool is_not_elevated    = ground_elevation < elevation_thr_[concentric_idx]; // 是否需要提升地面高度，是，则地表高度下降，则用于更新；否，则地面高度抬升
+                bool is_flat            = ground_flatness < flatness_thr_[concentric_idx];   // 是否平坦，update
+                bool is_near_zone       = concentric_idx < num_rings_of_interest_; // 是否在内4环内
+                bool is_heading_outside = heading < 0.0; // 判断夹角，（90 - 180）之间，用于判别有一定高度的平面，如平顶屋等
 
                 /*
                     Store the elevation & flatness variables
                     for A-GLE (Adaptive Ground Likelihood Estimation)
                     and TGR (Temporal Ground Revert). More information in the paper Patchwork++.
+                    TGR： 时序地面回复模块，目的是将欠分割的路面恢复成路面点。
                 */
+                // 用于更新参数：内4环，地面，地表高度下降情况下
                 if (is_upright && is_not_elevated && is_near_zone)
                 {
                     update_elevation_[concentric_idx].push_back(ground_elevation);
                     update_flatness_[concentric_idx].push_back(ground_flatness);
-
                     ringwise_flatness.push_back(ground_flatness);
                 }
 
-                // Ground estimation based on conditions
+                // Ground estimation based on conditions, 基于不同条件的似然估计
                 if (!is_upright)
                 {
-                    cloud_nonground += regionwise_ground_;
+                    cloud_nonground += regionwise_ground_; // 斜平面或者杂乱点（非地面点）
                 }
                 else if (!is_near_zone)
                 {
@@ -592,7 +638,7 @@ void PatchWorkpp<PointT>::estimate_ground(
                 }
                 else if (!is_heading_outside)
                 {
-                    cloud_nonground += regionwise_ground_;
+                    cloud_nonground += regionwise_ground_;// 平屋顶
                 }
                 else if (is_not_elevated || is_flat)
                 {
@@ -600,6 +646,7 @@ void PatchWorkpp<PointT>::estimate_ground(
                 }
                 else
                 {
+                    // TGR此操作前，大部分地面点已经被去除了，regionwise_ground_ 本身不是特别准， 掺杂了部分地面与非地面点，如4环出现杂草
                     RevertCandidate<PointT> candidate(concentric_idx, sector_idx, ground_flatness, line_variable, pc_mean_, regionwise_ground_);
                     candidates.push_back(candidate);
                 }
@@ -612,6 +659,7 @@ void PatchWorkpp<PointT>::estimate_ground(
 
             double t_bef_revert = ros::Time::now().toSec();
 
+            // 对一个ring中的candidates进行操作
             if (!candidates.empty())
             {
                 if (enable_TGR_)
@@ -634,9 +682,9 @@ void PatchWorkpp<PointT>::estimate_ground(
 
             t_revert += t_aft_revert - t_bef_revert;
 
-            concentric_idx++;
+            concentric_idx++; // 关注前4个ring
         }
-    }    
+    }
 
     double t_update = ros::Time::now().toSec();
 
@@ -694,6 +742,10 @@ void PatchWorkpp<PointT>::estimate_ground(
     vertical_pc_.clear();
 }
 
+
+/*
+ * 利用时序，更新A-GLE模型中高度阈值
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::update_elevation_thr(void)
 {
@@ -711,6 +763,7 @@ void PatchWorkpp<PointT>::update_elevation_thr(void)
 
         // if (verbose_) cout << "elevation threshold [" << i << "]: " << elevation_thr_[i] << endl;
 
+        // 是否超出队列长度，队列长度最大1000
         int exceed_num = update_elevation_[i].size() - max_elevation_storage_;
         if (exceed_num > 0) update_elevation_[i].erase(update_elevation_[i].begin(), update_elevation_[i].begin() + exceed_num);
     }
@@ -725,10 +778,14 @@ void PatchWorkpp<PointT>::update_elevation_thr(void)
     return;
 }
 
+
+/*
+ * 利用时序，更新A-GLE模型中平整度阈值
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::update_flatness_thr(void)
 {
-    for (int i=0; i<num_rings_of_interest_; i++)
+    for (int i=0; i<num_rings_of_interest_; i++) // 4
     {
         if (update_flatness_[i].empty()) break;
         if (update_flatness_[i].size() <= 1) break;
@@ -752,6 +809,10 @@ void PatchWorkpp<PointT>::update_flatness_thr(void)
     return;
 }
 
+
+/*
+ * TGR： 时序地面恢复，针对内圈中的几个patch中偶尔平坦度突变的情况，可以纠正回来
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::temporal_ground_revert(pcl::PointCloud<PointT> &cloud_ground, pcl::PointCloud<PointT> &cloud_nonground,
                                                std::vector<double> ring_flatness, std::vector<RevertCandidate<PointT>> candidates,
@@ -767,7 +828,8 @@ void PatchWorkpp<PointT>::temporal_ground_revert(pcl::PointCloud<PointT> &cloud_
         cout << "[" << candidates[0].concentric_idx << ", " << candidates[0].sector_idx << "]"
              << " mean_flatness: " << mean_flatness << ", stdev_flatness: " << stdev_flatness << std::endl;
     }
-
+    
+    // 针对每一个候选patch进行操作
     for( size_t i=0; i<candidates.size(); i++ )
     {
         RevertCandidate<PointT> candidate = candidates[i];
@@ -798,13 +860,13 @@ void PatchWorkpp<PointT>::temporal_ground_revert(pcl::PointCloud<PointT> &cloud_
 
         if ( concentric_idx < num_rings_of_interest_ )
         {
+            // 内4环，将有问题的重新恢复为地面点
             if (revert)
             {
                 if (verbose_)
                 {
                     cout << "\033[1;32m" << "REVERT TRUE" << "\033[0m" << endl;
                 }
-                
                 revert_pc_ += candidate.regionwise_ground;
                 cloud_ground += candidate.regionwise_ground;
             }
@@ -816,13 +878,21 @@ void PatchWorkpp<PointT>::temporal_ground_revert(pcl::PointCloud<PointT> &cloud_
                 }
                 reject_pc_ += candidate.regionwise_ground;
                 cloud_nonground += candidate.regionwise_ground;
-            }                
+            }
         }
     }
 
     if (verbose_) std::cout << "\033[1;34m" << "====================================================" << "\033[0m" << endl;
 }
 
+
+/*
+ * A-GLE: Adaptive Ground Likelihood Estimation（自适应地面似然估计）
+ * @param_in: zone_idx 区域索引
+ * @param_in: src 高度排序好的每一个patch中的点云
+ * @param_out: dst 地面点
+ * @param_out: non_ground_dst 非地面点
+ */
 // For adaptive
 template<typename PointT> inline
 void PatchWorkpp<PointT>::extract_piecewiseground(
@@ -835,19 +905,19 @@ void PatchWorkpp<PointT>::extract_piecewiseground(
     if (!dst.empty()) dst.clear();
     if (!non_ground_dst.empty()) non_ground_dst.clear();
     
-    // 1. Region-wise Vertical Plane Fitting (R-VPF) 
-    // : removes potential vertical plane under the ground plane
-    pcl::PointCloud<PointT> src_wo_verticals;
+    // 1. Region-wise Vertical Plane Fitting (R-VPF) 区域垂直平面拟合: removes potential vertical plane under the ground plane
+    pcl::PointCloud<PointT> src_wo_verticals; // 无垂直点的点云
     src_wo_verticals = src;
 
     if (enable_RVPF_)
     {
         for (int i = 0; i < num_iter_; i++)
         {
-            extract_initial_seeds(zone_idx, src_wo_verticals, ground_pc_, th_seeds_v_);
+            extract_initial_seeds(zone_idx, src_wo_verticals, ground_pc_, th_seeds_v_); // 种子点中可能含有垂直墙面的点
             estimate_plane(ground_pc_);
 
-            if (zone_idx == 0 && normal_(2) < uprightness_thr_)
+            // 去掉墙面的点
+            if (zone_idx == 0 && normal_(2) < uprightness_thr_) // uprightness_thr_: 0.7
             {
                 pcl::PointCloud<PointT> src_tmp;
                 src_tmp = src_wo_verticals;
@@ -862,9 +932,9 @@ void PatchWorkpp<PointT>::extract_piecewiseground(
                 Eigen::VectorXf result = points * normal_;
 
                 for (int r = 0; r < result.rows(); r++) {
-                    if (result[r] < th_dist_v_ - d_ && result[r] > -th_dist_v_ - d_) {
-                        non_ground_dst.points.push_back(src_tmp[r]);
-                        vertical_pc_.points.push_back(src_tmp[r]);
+                    if (result[r] < th_dist_v_ - d_ && result[r] > -th_dist_v_ - d_) { // th_dist_v_: 0.25
+                        non_ground_dst.points.push_back(src_tmp[r]); // 非地点取值1，
+                        vertical_pc_.points.push_back(src_tmp[r]); // 垂直点，如墙面，可视化调试
                     } else {
                         src_wo_verticals.points.push_back(src_tmp[r]);
                     }
@@ -874,13 +944,13 @@ void PatchWorkpp<PointT>::extract_piecewiseground(
         }
     }
     
-    extract_initial_seeds(zone_idx, src_wo_verticals, ground_pc_);
+    // 再次对没有垂直点的点云集合， 进行平面估计
+    extract_initial_seeds(zone_idx, src_wo_verticals, ground_pc_); 
     estimate_plane(ground_pc_);
 
-    // 2. Region-wise Ground Plane Fitting (R-GPF)
-    // : fits the ground plane
+    // 2. Region-wise Ground Plane Fitting (R-GPF): fits the ground plane
 
-    //pointcloud to matrix
+    // pointcloud to matrix
     Eigen::MatrixXf points(src_wo_verticals.points.size(), 3);
     int j = 0;
     for (auto &p:src_wo_verticals.points) {
@@ -895,24 +965,30 @@ void PatchWorkpp<PointT>::extract_piecewiseground(
         Eigen::VectorXf result = points * normal_;
         // threshold filter
         for (int r = 0; r < result.rows(); r++) {
+            // 前n-1次迭代处理，只记录ground_pc
             if (i < num_iter_ - 1) {
-                if (result[r] < th_dist_ - d_ ) {
+                if (result[r] < th_dist_ - d_ ) { // th_dist_: 0.3
                     ground_pc_.points.push_back(src_wo_verticals[r]);
                 }
             } else { // Final stage
                 if (result[r] < th_dist_ - d_ ) {
-                    dst.points.push_back(src_wo_verticals[r]);
+                    dst.points.push_back(src_wo_verticals[r]); // 地面点最终赋值位置
                 } else {
-                    non_ground_dst.points.push_back(src_wo_verticals[r]);
+                    non_ground_dst.points.push_back(src_wo_verticals[r]); // 非地点取值2
                 }
             }
         }
 
         if (i < num_iter_ -1) estimate_plane(ground_pc_);
+        // final stage
         else estimate_plane(dst);
     }
 }
 
+
+/*
+ * 可视化： 绘制可视化的多边形线，将每一个patch单独显示
+ */
 template<typename PointT> inline
 geometry_msgs::PolygonStamped PatchWorkpp<PointT>::set_polygons(int zone_idx, int r_idx, int theta_idx, int num_split) {
     geometry_msgs::PolygonStamped polygons;
@@ -961,6 +1037,10 @@ geometry_msgs::PolygonStamped PatchWorkpp<PointT>::set_polygons(int zone_idx, in
     return polygons;
 }
 
+
+/*
+ * 可视化： 设置每一个patch中状态估计
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::set_ground_likelihood_estimation_status(
         const int zone_idx, const int ring_idx,
@@ -987,6 +1067,9 @@ void PatchWorkpp<PointT>::set_ground_likelihood_estimation_status(
     }
 }
 
+/*
+ * 计算均值mean 和标准差stdev
+ */
 template<typename PointT> inline
 void PatchWorkpp<PointT>::calc_mean_stdev(std::vector<double> vec, double &mean, double &stdev)
 {
@@ -999,6 +1082,10 @@ void PatchWorkpp<PointT>::calc_mean_stdev(std::vector<double> vec, double &mean,
     stdev = sqrt(stdev);
 }
 
+
+/*
+ * 方位角计算：根据xy坐标计算与x轴之间夹角，范围 0 ~ 2 * PI
+ */
 template<typename PointT> inline
 double PatchWorkpp<PointT>::xy2theta(const double &x, const double &y) { // 0 ~ 2 * PI
     // if (y >= 0) {
@@ -1007,20 +1094,29 @@ double PatchWorkpp<PointT>::xy2theta(const double &x, const double &y) { // 0 ~ 
     //     return 2 * M_PI + atan2(y, x);// 3, 4 quadrant
     // }
 
-    double angle = atan2(y, x);
-    return angle > 0 ? angle : 2*M_PI+angle;
+    double angle = atan2(y, x);// 方位角，值域范围 -PI ~ PI
+    return angle > 0 ? angle : 2*M_PI+angle; // 0 ~ 2 * PI
 }
 
+
+/*
+ * 根据xy坐标计算半径长度
+ */
 template<typename PointT> inline
 double PatchWorkpp<PointT>::xy2radius(const double &x, const double &y) {
     return sqrt(pow(x, 2) + pow(y, 2));
 }
 
-template<typename PointT> inline
-void PatchWorkpp<PointT>::pc2czm(const pcl::PointCloud<PointT> &src, std::vector<Zone> &czm, pcl::PointCloud<PointT> &cloud_nonground) {
 
+/*
+ * 将点云存入到CZM模型中，检测范围以外的直接归类为非地点
+ */
+template<typename PointT> inline
+void PatchWorkpp<PointT>::pc2czm(const pcl::PointCloud<PointT> &src, std::vector<Zone> &czm, pcl::PointCloud<PointT> &cloud_nonground) 
+{
+    // 通过三个坐标来确定索引操作
     for (int i=0; i<src.size(); i++) {
-        
+
         if ((!noise_idxs_.empty()) &&(i == noise_idxs_.front())) {
             noise_idxs_.pop();
             continue;
@@ -1029,6 +1125,7 @@ void PatchWorkpp<PointT>::pc2czm(const pcl::PointCloud<PointT> &src, std::vector
         PointT pt = src.points[i];
 
         double r = xy2radius(pt.x, pt.y);
+        // r 在最大最小范围内
         if ((r <= max_range_) && (r > min_range_)) {
             double theta = xy2theta(pt.x, pt.y);
             
