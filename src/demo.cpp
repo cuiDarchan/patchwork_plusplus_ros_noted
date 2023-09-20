@@ -55,7 +55,7 @@ int main(int argc, char**argv) {
     ros::NodeHandle nh;
 
     std::string cloud_topic;
-    nh.param<string>("/cloud_topic", cloud_topic, "/pointcloud");
+    nh.param<string>("/livox/lidar", cloud_topic, "/livox/lidar");
 
     cout << "Operating patchwork++..." << endl;
     PatchworkppGroundSeg.reset(new PatchWorkpp<PointType>(&nh));
